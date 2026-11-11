@@ -23,6 +23,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # The isolated copy has no GH_PAT, so the job runs on the workflow token; the
+  # trailing reaction step needs the scope the PAT used to provide.
+  issues: write
 
 jobs:
   create-release-pr:
