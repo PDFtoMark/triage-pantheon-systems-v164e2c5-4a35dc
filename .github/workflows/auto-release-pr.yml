@@ -1,0 +1,331 @@
+name: Auto Release PR
+
+on:
+  # Trigger when PRs are merged to 0.x
+  pull_request_target:
+    types: [closed]
+    branches:
+      - 0.x
+
+  # Trigger when comments are added (for /version override)
+  issue_comment:
+    types: [created]
+
+  # Trigger when PR title is edited (for version override).
+  # Deliberately not on synchronize: a push to the release branch would re-run
+  # this workflow, which resets that branch and closes the pull request. Signing
+  # the release commit requires a push, so that made the release unmergeable.
+  pull_request:
+    types: [edited]
+    branches:
+      - 0.x
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-release-pr:
+    name: Create or Update Release PR
+    runs-on: ubuntu-latest
+    # Only run if:
+    # 1. Non-release PR was merged to 0.x (don't trigger when release PR is merged), OR
+    # 2. Comment on a release PR (but not from bot), OR
+    # 3. Release PR was edited
+    if: |
+      (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true && !startsWith(github.event.pull_request.title, 'Release ')) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.issue.title, 'Release ') && github.event.comment.user.login != 'github-actions[bot]') ||
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'Release '))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: 0.x
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for version override in comment
+        id: check_comment
+        if: github.event_name == 'issue_comment'
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Check if comment contains /version command
+          if echo "$COMMENT_BODY" | grep -qE '^/version [0-9]+\.[0-9]+\.[0-9]+$'; then
+            VERSION=$(echo "$COMMENT_BODY" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            echo "override_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "has_override=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_override=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for version override in PR title
+        id: check_title
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || github.event_name == 'issue_comment'
+        env:
+          PR_TITLE: ${{ github.event_name == 'issue_comment' && github.event.issue.title || github.event.pull_request.title }}
+        run: |
+          # Extract version from "Release X.Y.Z" title
+          if echo "$PR_TITLE" | grep -qE '^Release [0-9]+\.[0-9]+\.[0-9]+'; then
+            VERSION=$(echo "$PR_TITLE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            echo "override_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "has_override=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_override=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine next version
+        id: version
+        env:
+          COMMENT_HAS_OVERRIDE: ${{ steps.check_comment.outputs.has_override }}
+          COMMENT_OVERRIDE_VERSION: ${{ steps.check_comment.outputs.override_version }}
+          TITLE_HAS_OVERRIDE: ${{ steps.check_title.outputs.has_override }}
+          TITLE_OVERRIDE_VERSION: ${{ steps.check_title.outputs.override_version }}
+        run: |
+          # Get latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+          # Check for overrides (using env vars to prevent code injection)
+          if [ "$COMMENT_HAS_OVERRIDE" = "true" ]; then
+            NEW_VERSION="$COMMENT_OVERRIDE_VERSION"
+            echo "source=comment" >> $GITHUB_OUTPUT
+          elif [ "$TITLE_HAS_OVERRIDE" = "true" ]; then
+            NEW_VERSION="$TITLE_OVERRIDE_VERSION"
+            echo "source=title" >> $GITHUB_OUTPUT
+          else
+            # Auto-increment patch version
+            IFS='.' read -r major minor patch <<< "${LATEST_TAG}"
+            NEW_VERSION="${major}.${minor}.$((patch + 1))"
+            echo "source=auto" >> $GITHUB_OUTPUT
+          fi
+
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version will be: $NEW_VERSION"
+
+      - name: Fetch latest action versions
+        id: action_versions
+        run: |
+          # Fetch latest versions for actions referenced in README
+          CHECKOUT_VERSION=$(gh release view --repo actions/checkout --json tagName -q .tagName)
+          CACHE_VERSION=$(gh release view --repo actions/cache --json tagName -q .tagName)
+
+          echo "checkout=$CHECKOUT_VERSION" >> $GITHUB_OUTPUT
+          echo "cache=$CACHE_VERSION" >> $GITHUB_OUTPUT
+
+          echo "Latest action versions:"
+          echo "  actions/checkout: $CHECKOUT_VERSION"
+          echo "  actions/cache: $CACHE_VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Check if release PR exists
+        id: check_pr
+        run: |
+          # Check for existing release PR and get its head branch
+          PR_DATA=$(gh pr list --base 0.x --state open --json number,title,headRefName --jq '.[] | select(.title | startswith("Release "))' | head -1)
+
+          if [ -n "$PR_DATA" ]; then
+            PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
+            HEAD_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName')
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            echo "head_branch=$HEAD_BRANCH" >> $GITHUB_OUTPUT
+            echo "Found existing release PR #$PR_NUMBER (branch: $HEAD_BRANCH)"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No existing release PR found"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Close old PR if version changed
+        if: steps.check_pr.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PR_NUMBER: ${{ steps.check_pr.outputs.pr_number }}
+          OLD_BRANCH: ${{ steps.check_pr.outputs.head_branch }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          NEW_BRANCH="release-${NEW_VERSION}"
+
+          # If the branch name changed (version override), close old PR
+          if [ "$OLD_BRANCH" != "$NEW_BRANCH" ]; then
+            echo "Version changed, closing old PR #$PR_NUMBER (branch: $OLD_BRANCH)"
+            gh pr close "$PR_NUMBER" --comment "Closing this PR because the version was changed. A new PR will be created for version $NEW_VERSION."
+
+            # Delete the old branch
+            git push origin --delete "$OLD_BRANCH" || echo "Branch $OLD_BRANCH already deleted or doesn't exist"
+
+            echo "Closed old PR and deleted branch $OLD_BRANCH"
+          else
+            echo "Same version, will update existing PR"
+          fi
+
+      - name: Determine release branch name
+        id: branch
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          echo "branch_name=release-${NEW_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Update versions in README
+        env:
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          CHECKOUT_VERSION: ${{ steps.action_versions.outputs.checkout }}
+          CACHE_VERSION: ${{ steps.action_versions.outputs.cache }}
+        run: |
+          # Escape dots for sed
+          LATEST_TAG_ESCAPED=$(echo "$LATEST_TAG" | sed 's/\./\\./g')
+
+          # Update pantheon-systems/push-to-pantheon version references
+          # Only update semantic version tags, not branch references
+          sed -i "s|pantheon-systems/push-to-pantheon@${LATEST_TAG_ESCAPED}|pantheon-systems/push-to-pantheon@${NEW_VERSION}|g" readme.md
+
+          # Update actions/checkout to latest (only update major version references like @v6)
+          CHECKOUT_MAJOR=$(echo "$CHECKOUT_VERSION" | grep -oE '^v[0-9]+')
+          sed -i "s|actions/checkout@v[0-9]\+|actions/checkout@${CHECKOUT_MAJOR}|g" readme.md
+
+          # Update actions/cache to latest
+          CACHE_MAJOR=$(echo "$CACHE_VERSION" | grep -oE '^v[0-9]+')
+          sed -i "s|actions/cache@v[0-9]\+|actions/cache@${CACHE_MAJOR}|g" readme.md
+
+          echo "Updated README.md with new versions"
+
+      - name: Check for changes
+        id: commit
+        run: |
+          if git diff --quiet -- readme.md; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes to commit"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      # Created via the Contents API rather than `git commit` + `git push`, which keeps
+      # the branch reset and the commit in one place.
+      #
+      # Note this does NOT produce a signed commit. GitHub only signs API commits it
+      # can attribute to an identity it controls -- a GitHub App installation token,
+      # or the web flow -- and this authenticates with a personal PAT, so the commit
+      # is attributed to the PAT owner and left unsigned. The org enforces
+      # required_signatures on 0.x, so the version-bump commit has to be amended and
+      # signed by hand before the release PR can merge. See CONTRIBUTING.md step 3.
+      - name: Create/reset release branch and commit via GitHub API
+        if: steps.commit.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          BRANCH_NAME: ${{ steps.branch.outputs.branch_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          BASE_SHA=$(git rev-parse HEAD)
+          ORIGINAL_BLOB_SHA=$(git rev-parse HEAD:readme.md)
+
+          # Point the release branch at the latest 0.x commit, creating it if it
+          # doesn't exist or resetting it if it does.
+          if gh api "repos/${REPO}/git/ref/heads/${BRANCH_NAME}" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPO}/git/refs/heads/${BRANCH_NAME}" \
+              -f sha="$BASE_SHA" -F force=true
+          else
+            gh api --method POST "repos/${REPO}/git/refs" \
+              -f ref="refs/heads/${BRANCH_NAME}" -f sha="$BASE_SHA"
+          fi
+
+          # Commit the updated README to that branch via the Contents API.
+          # GitHub signs commits made through the API with its own verified key.
+          gh api --method PUT "repos/${REPO}/contents/readme.md" \
+            -f message="docs: Bump version to ${NEW_VERSION}" \
+            -f content="$(base64 -w0 readme.md)" \
+            -f sha="$ORIGINAL_BLOB_SHA" \
+            -f branch="$BRANCH_NAME"
+
+      - name: Create or update PR
+        if: steps.commit.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          BRANCH_NAME: ${{ steps.branch.outputs.branch_name }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
+          CHECKOUT_VERSION: ${{ steps.action_versions.outputs.checkout }}
+          CACHE_VERSION: ${{ steps.action_versions.outputs.cache }}
+        run: |
+          # Extract major versions only (v6 from v6.0.2, v5 from v5.0.3)
+          CHECKOUT_MAJOR=$(echo "$CHECKOUT_VERSION" | grep -oE '^v[0-9]+')
+          CACHE_MAJOR=$(echo "$CACHE_VERSION" | grep -oE '^v[0-9]+')
+
+          PR_BODY="This PR updates version references in the README from \`$LATEST_TAG\` to \`$NEW_VERSION\`.
+
+          ## Changes
+          - Updated \`pantheon-systems/push-to-pantheon\` references to \`$NEW_VERSION\`
+          - Updated \`actions/checkout\` to \`$CHECKOUT_MAJOR\`
+          - Updated \`actions/cache\` to \`$CACHE_MAJOR\`
+
+          ## Version Override
+          You can override the version by:
+          1. **Edit the PR title** to \`Release X.Y.Z\` (e.g., \`Release 0.9.0\`)
+          2. **Comment** \`/version X.Y.Z\` (e.g., \`/version 0.9.0\`)
+
+          The workflow will automatically update the branch with the new version.
+
+          ## Release Process
+          1. Review the version changes
+          2. Override the version if needed (see above)
+          3. Mark this PR as **Ready for review** when you're ready to release
+          4. Merge this PR
+          5. Run the **Create Release** workflow to publish the release"
+
+          # Check if we need to create new PR or update existing
+          # If old branch exists but differs from new branch, we closed it and need to create new
+          if [ "${{ steps.check_pr.outputs.exists }}" = "true" ] && [ "${{ steps.check_pr.outputs.head_branch }}" = "$BRANCH_NAME" ]; then
+            # Update existing PR (same branch)
+            PR_NUMBER="${{ steps.check_pr.outputs.pr_number }}"
+            gh pr edit "$PR_NUMBER" \
+              --title "Release $NEW_VERSION" \
+              --body "$PR_BODY"
+
+            # Ensure release label is applied
+            gh pr edit "$PR_NUMBER" --add-label "release"
+
+            echo "Updated existing PR #$PR_NUMBER"
+          else
+            # Create new PR (either no PR exists, or we closed the old one due to version change)
+            gh pr create \
+              --base 0.x \
+              --head "$BRANCH_NAME" \
+              --title "Release $NEW_VERSION" \
+              --body "$PR_BODY" \
+              --label "release" \
+              --draft
+            echo "Created new draft PR for $NEW_VERSION"
+          fi
+
+      - name: Comment on trigger PR
+        if: github.event_name == 'pull_request_target' && github.event.pull_request.merged == true
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "🤖 A release PR for version \`$NEW_VERSION\` has been created/updated automatically."
+
+      - name: React to version override comment
+        if: github.event_name == 'issue_comment' && steps.check_comment.outputs.has_override == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='rocket'

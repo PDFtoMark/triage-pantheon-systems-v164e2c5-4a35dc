@@ -1,0 +1,732 @@
+#!/usr/bin/env bats
+# Tests for cleanup() function
+
+load helpers/common
+load helpers/pantheon
+
+setup() {
+    common_setup
+    load_main_script
+
+    # Skip all tests if required env vars not available
+    if [ -z "${PANTHEON_MACHINE_TOKEN}" ] || [ -z "${PANTHEON_TEST_SITE}" ]; then
+        skip "Pantheon credentials not available"
+    fi
+
+    # Authenticate Terminus for tests that call terminus commands
+    authenticate_terminus
+
+    # Set up required environment variables
+    export PANTHEON_SITE="$(get_test_site)"
+    export PANTHEON_TARGET_ENV="$(get_test_env)"
+    export GITHUB_REPOSITORY="pantheon-systems/push-to-pantheon"
+}
+
+teardown() {
+    common_teardown
+}
+
+@test "cleanup: DELETE_OLD_MULTIDEVS not true skips deletion" {
+    unset DELETE_OLD_MULTIDEVS
+
+    run cleanup
+    # Should exit 0 but skip deletion
+    assert_output_contains "delete_old_environments was not set to true"
+}
+
+@test "cleanup: DELETE_OLD_MULTIDEVS=false skips deletion" {
+    export DELETE_OLD_MULTIDEVS="false"
+
+    run cleanup
+    assert_output_contains "delete_old_environments was not set to true"
+}
+
+@test "cleanup: runs build:env:delete:pr for PR environments" {
+    export DELETE_OLD_MULTIDEVS="true"
+
+    # Just verify the function attempts to run the command
+    # We can't easily verify actual deletion without creating test PRs
+    run cleanup
+
+    # Should see the terminus command output
+    assert_output_contains "Deleting stale Pantheon PR multidev environments"
+}
+
+@test "cleanup: respects MULTIDEV_AGE_THRESHOLD_DAYS" {
+    export DELETE_OLD_MULTIDEVS="true"
+    export MULTIDEV_AGE_THRESHOLD_DAYS="30"
+
+    run cleanup
+
+    assert_output_contains "Age threshold:"
+    assert_output_contains "30 days"
+}
+
+@test "cleanup: default age threshold is 14 days" {
+    export DELETE_OLD_MULTIDEVS="true"
+    unset MULTIDEV_AGE_THRESHOLD_DAYS
+
+    run cleanup
+
+    assert_output_contains "Age threshold:"
+    assert_output_contains "14 days"
+}
+
+@test "cleanup: protects current target environment" {
+    export DELETE_OLD_MULTIDEVS="true"
+    export PANTHEON_TARGET_ENV="$(get_test_env)"
+
+    # The test multidev should never be deleted during this test
+    run cleanup
+
+    # Should succeed and not attempt to delete the current environment
+    assert_success
+    # The output should not contain deletion of the test environment
+    assert_output_not_contains "Deleting $(get_test_env)"
+}
+
+@test "cleanup: protects environments with same prefix" {
+    export DELETE_OLD_MULTIDEVS="true"
+    export PANTHEON_TARGET_ENV="test-std"
+
+    run cleanup
+
+    # Should protect test-std, test-cont, test-git, test-term, test-adv
+    assert_output_contains "Protecting all environments with prefix"
+}
+
+@test "cleanup: no old environments results in no deletion" {
+    export DELETE_OLD_MULTIDEVS="true"
+    export MULTIDEV_AGE_THRESHOLD_DAYS="365"  # Very old threshold
+
+    run cleanup
+
+    # With such a high threshold, no environments should match
+    assert_success
+    assert_output_contains "No old environments found older than 365 days"
+}
+
+# --- cleanup_closed_pr_multidevs() ---
+#
+# Workaround for terminus-build-tools-plugin#505 (push-to-pantheon#172). These tests
+# pass in an environment list directly so they exercise the PR-resolution logic
+# without needing real pr-* multidevs on the test site; the delete calls are no-ops
+# because the named environments do not exist.
+
+@test "cleanup_closed_pr_multidevs: skips when GITHUB_REPOSITORY is unset" {
+    unset GITHUB_REPOSITORY
+
+    run cleanup_closed_pr_multidevs "pr-1"
+
+    assert_success
+    assert_output_contains "GITHUB_REPOSITORY is not set"
+}
+
+@test "cleanup_closed_pr_multidevs: no pr-* environments is a no-op" {
+    run cleanup_closed_pr_multidevs "$(printf 'dev\ntest\nlive\n0x-std')"
+
+    assert_success
+    assert_output_contains "No pr-* multidevs left to check"
+}
+
+@test "cleanup_closed_pr_multidevs: ignores environments that only look like PR envs" {
+    run cleanup_closed_pr_multidevs "$(printf 'pr-abc\npr-\npr-12-git')"
+
+    assert_success
+    assert_output_contains "No pr-* multidevs left to check"
+}
+
+@test "cleanup_closed_pr_multidevs: flags an environment whose PR is closed" {
+    # PR #171 is merged in this repo, so its state is permanently "closed".
+    run cleanup_closed_pr_multidevs "pr-171"
+
+    assert_success
+    assert_output_contains "PR #171 is closed"
+    assert_output_contains "stale"
+}
+
+@test "cleanup_closed_pr_multidevs: keeps an environment whose PR cannot be resolved" {
+    run cleanup_closed_pr_multidevs "pr-99999999"
+
+    assert_success
+    assert_output_contains "Could not resolve PR #99999999"
+    assert_output_contains "No stale closed-PR multidevs found"
+}
+
+@test "cleanup_closed_pr_multidevs: never deletes the current target environment" {
+    export PANTHEON_TARGET_ENV="pr-171"
+
+    run cleanup_closed_pr_multidevs "pr-171"
+
+    assert_success
+    assert_output_not_contains "PR #171 is closed"
+    assert_output_contains "No stale closed-PR multidevs found"
+}
+
+@test "cleanup_closed_pr_multidevs: keeps an environment whose PR is open" {
+    local open_pr
+    open_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=1" --jq '.[0].number' 2>/dev/null || echo "")
+    if [ -z "${open_pr}" ] || [ "${open_pr}" = "null" ]; then
+        skip "no open PR on ${GITHUB_REPOSITORY} to test against"
+    fi
+
+    run cleanup_closed_pr_multidevs "pr-${open_pr}"
+
+    assert_success
+    assert_output_not_contains "is stale"
+    assert_output_contains "No stale closed-PR multidevs found"
+}
+
+# --- resolve_github_environments() / delete_github_environment() (issue #101) ---
+#
+# The GitHub deployment environment is normally named after the Pantheon multidev,
+# but deployment_environment breaks that on purpose so several sites deploying one
+# branch get distinct entries in the pull request timeline. Cleanup therefore
+# resolves the mapping from each deployment's payload rather than trusting the name.
+#
+# These create real deployments and environments on this repository and remove them
+# again in teardown. Names are suffixed with the commit SHA so concurrent runs on
+# different commits cannot collide.
+
+# Unique suffix for this run's fixtures.
+_fixture_suffix() {
+    local sha="${GITHUB_SHA:-}"
+    if [ -z "${sha}" ]; then
+        sha=$(git -C "${BATS_TEST_DIRNAME}/.." rev-parse HEAD 2>/dev/null || echo "local")
+    fi
+    # The test number keeps fixtures apart. CI runs bats with --jobs, which also
+    # parallelizes tests *within* this file, and several tests share an environment
+    # or site name derived from this suffix. Without it a sweep in one test (which
+    # deletes everything for its site) removes the fixtures of another running at
+    # the same moment.
+    echo "${sha:0:7}-t${BATS_TEST_NUMBER:-0}"
+}
+
+# A ref that definitely exists on the remote, for the deployment to point at.
+_fixture_ref() {
+    gh api "repos/${GITHUB_REPOSITORY}/commits/0.x" --jq '.sha' 2>/dev/null
+}
+
+# Create a real deployment carrying our payload. Creating a deployment in a new
+# environment creates the environment too.
+_make_deployment() {
+    local env_name="$1" pantheon_env="$2" pantheon_site="$3" ref
+    ref=$(_fixture_ref)
+    [ -n "${ref}" ] || return 1
+
+    # Write the body to a file rather than piping it on stdin.
+    local body="${TEST_TEMP_DIR}/deployment-${env_name}.json"
+    cat > "${body}" <<JSON
+{"ref": "${ref}",
+ "environment": "${env_name}",
+ "auto_merge": false,
+ "required_contexts": [],
+ "transient_environment": true,
+ "description": "push-to-pantheon BATS fixture",
+ "payload": {"pantheon_site": "${pantheon_site}", "pantheon_env": "${pantheon_env}"}}
+JSON
+
+    gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input "${body}" >/dev/null 2>&1
+
+    # Newline-separated: main.sh sets IFS to newline+tab, so a space-joined list
+    # would never split and the whole string would be treated as one name.
+    CREATED_ENVS="${CREATED_ENVS}${env_name}"$'\n'
+}
+
+# Wait until a fixture deployment's payload reads back.
+#
+# Creating a deployment and immediately querying it is not guaranteed to return
+# the payload, and resolve_github_environments treats an unreadable site as a
+# match -- so a slow read would make an environment look like it belonged to
+# whichever site was asking. That is correct for real cleanup but makes these
+# assertions racy, so settle first.
+_await_payload() {
+    local env_name="$1" expected_site="$2" attempts=20 i site
+    for ((i = 0; i < attempts; i++)); do
+        site=$(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}&per_page=1" \
+            --jq '.[0].payload.pantheon_site // empty' 2>/dev/null || true)
+        if [ "${site}" = "${expected_site}" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "payload for ${env_name} never reported site '${expected_site}'" >&2
+    return 1
+}
+
+# Remove every fixture environment this test created, deployments first.
+_cleanup_fixtures() {
+    local env_name dep
+    for env_name in ${CREATED_ENVS}; do
+        [ -n "${env_name}" ] || continue
+        for dep in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq '.[].id' 2>/dev/null); do
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${dep}/statuses" \
+                -f state=inactive -f description='fixture teardown' >/dev/null 2>&1 || true
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/deployments/${dep}" >/dev/null 2>&1 || true
+        done
+        gh api --method DELETE "repos/${GITHUB_REPOSITORY}/environments/${env_name}" >/dev/null 2>&1 || true
+    done
+    CREATED_ENVS=""
+}
+
+@test "resolve_github_environments: empty multidev name yields nothing" {
+    run resolve_github_environments ""
+    assert_success
+    [ -z "$output" ]
+}
+
+@test "resolve_github_environments: no GITHUB_REPOSITORY yields nothing" {
+    unset GITHUB_REPOSITORY
+
+    run resolve_github_environments "pr-1"
+    assert_success
+    [ -z "$output" ]
+}
+
+@test "resolve_github_environments: unknown multidev yields nothing" {
+    run resolve_github_environments "no-such-env-$$"
+    assert_success
+    [ -z "$output" ]
+}
+
+@test "resolve_github_environments: matching name short-circuits the payload lookup" {
+    CREATED_ENVS=""
+    local suffix env_name
+    suffix=$(_fixture_suffix)
+    env_name="ptp-same-${suffix}"
+
+    _make_deployment "${env_name}" "${env_name}" "$(get_test_site)"
+
+    run resolve_github_environments "${env_name}"
+    _cleanup_fixtures
+
+    assert_success
+    [ "$output" = "${env_name}" ]
+}
+
+@test "resolve_github_environments: finds a differently named environment via payload" {
+    CREATED_ENVS=""
+    local suffix multidev env_name
+    suffix=$(_fixture_suffix)
+    multidev="ptp-diff-${suffix}"
+    env_name="mysite-${multidev}"
+
+    _make_deployment "${env_name}" "${multidev}" "$(get_test_site)"
+    _await_payload "${env_name}" "$(get_test_site)"
+
+    run resolve_github_environments "${multidev}"
+    _cleanup_fixtures
+
+    assert_success
+    [ "$output" = "${env_name}" ]
+}
+
+@test "resolve_github_environments: picks the environment belonging to this site" {
+    CREATED_ENVS=""
+    local suffix multidev env_a env_b
+    suffix=$(_fixture_suffix)
+    multidev="ptp-two-${suffix}"
+    env_a="site-a-${multidev}"
+    env_b="site-b-${multidev}"
+
+    _make_deployment "${env_a}" "${multidev}" "site-a"
+    _make_deployment "${env_b}" "${multidev}" "site-b"
+    _await_payload "${env_a}" "site-a"
+    _await_payload "${env_b}" "site-b"
+
+    PANTHEON_SITE="site-b" run resolve_github_environments "${multidev}"
+    _cleanup_fixtures
+
+    assert_success
+    [ "$output" = "${env_b}" ]
+}
+
+@test "resolve_github_environments: does not match on a name substring alone" {
+    CREATED_ENVS=""
+    local suffix multidev env_name
+    suffix=$(_fixture_suffix)
+    # The environment belongs to "<multidev>9", so a lookup for "<multidev>" must
+    # not claim it even though the name contains that string.
+    multidev="ptp-sub-${suffix}"
+    env_name="mysite-${multidev}9"
+
+    _make_deployment "${env_name}" "${multidev}9" "$(get_test_site)"
+    _await_payload "${env_name}" "$(get_test_site)"
+
+    run resolve_github_environments "${multidev}"
+    _cleanup_fixtures
+
+    assert_success
+    [ -z "$output" ]
+}
+
+@test "delete_github_environment: reports when nothing resolves and deletes nothing" {
+    run delete_github_environment "no-such-env-$$"
+    assert_success
+    assert_output_contains "No GitHub environment found"
+    assert_output_not_contains "Deleting environment"
+}
+
+@test "delete_github_environment: removes the environment and its deployments" {
+    CREATED_ENVS=""
+    local suffix env_name
+    suffix=$(_fixture_suffix)
+    env_name="ptp-del-${suffix}"
+
+    _make_deployment "${env_name}" "${env_name}" "$(get_test_site)"
+
+    # Sanity: it exists before we delete it.
+    run gh api "repos/${GITHUB_REPOSITORY}/environments/${env_name}"
+    assert_success
+
+    run delete_github_environment "${env_name}"
+
+    # Must never fail the job, whether or not the token may delete environments.
+    assert_success
+    assert_output_contains "Deleting deployment ID"
+    assert_output_contains "Deleting environment"
+
+    # The deployments are the part that matters -- they are what appears in the
+    # pull request timeline -- and they must be gone regardless.
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "0" ]
+
+    _cleanup_fixtures
+}
+
+@test "delete_github_environment: surfaces a failed environment deletion without failing" {
+    # Deleting an environment needs administration: write, which the action does not
+    # request. That must be reported rather than swallowed -- it used to be neither
+    # checked nor surfaced, so runs claimed to delete environments they had not.
+    CREATED_ENVS=""
+    local suffix env_name
+    suffix=$(_fixture_suffix)
+    env_name="ptp-perm-${suffix}"
+
+    _make_deployment "${env_name}" "${env_name}" "$(get_test_site)"
+
+    run delete_github_environment "${env_name}"
+    _cleanup_fixtures
+
+    assert_success
+    if [ "${status}" -eq 0 ] && [[ "$output" == *"Kept environment"* ]]; then
+        # Token cannot delete environments: the reason must be explained.
+        assert_output_contains "administration: write"
+    else
+        # Token can: it must say so rather than silently doing nothing.
+        assert_output_contains "deleted"
+    fi
+}
+
+# --- cleanup_orphaned_github_deployments() (issue #172 follow-up) ---
+#
+# Every other GitHub cleanup path is multidev-driven: it only reaches a GitHub
+# environment as a side effect of this run deleting the matching Pantheon
+# multidev. cleanup_orphaned_github_deployments instead walks GitHub's
+# environments directly, so a multidev removed any other way still gets its
+# leftover deployments cleared. Fixture names end in "-std" so the sweep's own
+# environment-name filter picks them up, the same as real test-suite envs.
+#
+# The sweep walks every matching environment in the real repository, and these
+# tests hand it a made-up multidev list, so anything it is allowed to look at
+# reads as orphaned. Each fixture therefore carries a unique pantheon_site and
+# PANTHEON_SITE is set to match: the sweep skips every other site's deployments,
+# including a concurrent run's suite environments (an earlier version without this
+# deleted a finished PR suite's deployments).
+
+@test "cleanup_orphaned_github_deployments: skips when GITHUB_REPOSITORY is unset" {
+    unset GITHUB_REPOSITORY
+
+    run cleanup_orphaned_github_deployments "dev"
+    assert_success
+    assert_output_contains "GITHUB_REPOSITORY is not set"
+}
+
+@test "cleanup_orphaned_github_deployments: leaves an environment whose multidev still exists" {
+    CREATED_ENVS=""
+    local suffix env_name site
+    suffix=$(_fixture_suffix)
+    site="ptp-orph-${suffix}"
+    export PANTHEON_SITE="${site}"
+    env_name="ptp-orph-live-${suffix}-std"
+
+    _make_deployment "${env_name}" "${env_name}" "${site}"
+    _await_payload "${env_name}" "${site}"
+
+    run cleanup_orphaned_github_deployments "$(printf '%s\n' "${env_name}")" 0
+    assert_success
+    assert_output_not_contains "orphaned"
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "1" ]
+
+    _cleanup_fixtures
+}
+
+@test "cleanup_orphaned_github_deployments: deletes deployments once past the age threshold" {
+    CREATED_ENVS=""
+    local suffix env_name site
+    suffix=$(_fixture_suffix)
+    site="ptp-orph-${suffix}"
+    export PANTHEON_SITE="${site}"
+    env_name="ptp-orph-old-${suffix}-std"
+
+    _make_deployment "${env_name}" "${env_name}" "${site}"
+    _await_payload "${env_name}" "${site}"
+
+    run cleanup_orphaned_github_deployments "$(printf 'dev\ntest\nlive')" 0
+    assert_success
+    assert_output_contains "orphaned"
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "0" ]
+
+    _cleanup_fixtures
+}
+
+@test "cleanup_orphaned_github_deployments: leaves a recent orphaned deployment alone" {
+    CREATED_ENVS=""
+    local suffix env_name site
+    suffix=$(_fixture_suffix)
+    site="ptp-orph-${suffix}"
+    export PANTHEON_SITE="${site}"
+    env_name="ptp-orph-recent-${suffix}-std"
+
+    _make_deployment "${env_name}" "${env_name}" "${site}"
+    _await_payload "${env_name}" "${site}"
+
+    # A 31-year threshold keeps a just-created fixture well inside the window.
+    run cleanup_orphaned_github_deployments "$(printf 'dev\ntest\nlive')" 999999999
+    assert_success
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "1" ]
+
+    _cleanup_fixtures
+}
+
+@test "cleanup_orphaned_github_deployments: never touches the current target environment" {
+    CREATED_ENVS=""
+    local suffix env_name site
+    suffix=$(_fixture_suffix)
+    site="ptp-orph-${suffix}"
+    export PANTHEON_SITE="${site}"
+    env_name="ptp-orph-target-${suffix}-std"
+    export PANTHEON_TARGET_ENV="${env_name}"
+
+    _make_deployment "${env_name}" "${env_name}" "${site}"
+    _await_payload "${env_name}" "${site}"
+
+    run cleanup_orphaned_github_deployments "$(printf 'dev\ntest\nlive')" 0
+    assert_success
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "1" ]
+
+    _cleanup_fixtures
+}
+
+@test "cleanup_orphaned_github_deployments: skips an environment belonging to another Pantheon site" {
+    CREATED_ENVS=""
+    local suffix env_name site
+    suffix=$(_fixture_suffix)
+    site="ptp-orph-${suffix}"
+    export PANTHEON_SITE="${site}"
+    env_name="ptp-orph-site-${suffix}-std"
+
+    _make_deployment "${env_name}" "${env_name}" "some-other-site"
+    _await_payload "${env_name}" "some-other-site"
+
+    run cleanup_orphaned_github_deployments "$(printf 'dev\ntest\nlive')" 0
+    assert_success
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq 'length'
+    assert_success
+    [ "$output" = "1" ]
+
+    _cleanup_fixtures
+}
+
+# --- start/finish/prune_github_deployments (issue #195) ---
+#
+# These replaced bobheadxi/deployments, whose finish step made one unretried call
+# per old deployment and died on the first empty response. Reporting must never
+# fail a deploy, and an environment's history must not grow without bound.
+
+_deploy_env() {
+    export GITHUB_DEPLOYMENT_ENV="$1"
+    export CI_COMMIT_SHA
+    CI_COMMIT_SHA=$(_fixture_ref)
+    export CI_BUILD_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/1"
+    export GITHUB_OUTPUT="${TEST_TEMP_DIR}/github_output"
+    export GITHUB_API_RETRY_DELAY=0
+    export GITHUB_PRUNE_DELAY=0
+    : > "${GITHUB_OUTPUT}"
+}
+
+_deployment_count() {
+    gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=$1&per_page=100" --jq '.[].id' | wc -l | tr -d ' '
+}
+
+@test "start_github_deployment: records the payload and exposes the deployment id" {
+    CREATED_ENVS=""
+    local env_name
+    env_name="ptp-start-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    CREATED_ENVS="${env_name}"$'\n'
+    export PANTHEON_TARGET_ENV="${env_name}"
+    # A quote in the branch name is what broke the old interpolated JSON payload.
+    export DEPLOYMENT_SOURCE_BRANCH='fix/"quoted"\branch'
+
+    run start_github_deployment
+    assert_success
+
+    run grep -c '^deployment_id=[0-9]\+$' "${GITHUB_OUTPUT}"
+    [ "$output" = "1" ]
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}&per_page=1" \
+        --jq '.[0].payload | .pantheon_site + "|" + .pantheon_env + "|" + .source_branch'
+    assert_success
+    # Not @tsv: it escapes the backslash this branch name deliberately contains.
+    [ "$output" = "${PANTHEON_SITE}|${env_name}|${DEPLOYMENT_SOURCE_BRANCH}" ]
+
+    _cleanup_fixtures
+}
+
+@test "start_github_deployment: an API failure warns but never fails the run" {
+    _deploy_env "ptp-start-fail-$(_fixture_suffix)-std"
+    export GITHUB_REPOSITORY="pantheon-systems/no-such-repo-$$"
+
+    run start_github_deployment
+    assert_success
+    assert_output_contains "::warning::"
+    ! grep -q deployment_id "${GITHUB_OUTPUT}"
+}
+
+@test "finish_github_deployment: no deployment id is a no-op" {
+    unset GITHUB_DEPLOYMENT_ID
+
+    run finish_github_deployment
+    assert_success
+    assert_output_contains "No GitHub deployment to update"
+}
+
+@test "finish_github_deployment: maps job status to deployment state" {
+    CREATED_ENVS=""
+    local env_name id
+    env_name="ptp-finish-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    CREATED_ENVS="${env_name}"$'\n'
+    export PANTHEON_TARGET_ENV="${env_name}"
+    start_github_deployment > /dev/null
+    id=$(sed -n 's/^deployment_id=//p' "${GITHUB_OUTPUT}")
+    export GITHUB_DEPLOYMENT_ID="${id}"
+
+    local pair status expected state
+    for pair in success:success failure:failure cancelled:inactive; do
+        status="${pair%%:*}"
+        expected="${pair##*:}"
+        DEPLOYMENT_JOB_STATUS="${status}" run finish_github_deployment
+        assert_success
+        state=$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses" --jq '.[0].state')
+        [ "${state}" = "${expected}" ]
+    done
+
+    _cleanup_fixtures
+}
+
+@test "finish_github_deployment: an API failure warns but never fails the run" {
+    export GITHUB_DEPLOYMENT_ID="1"
+    export DEPLOYMENT_JOB_STATUS="success"
+    export GITHUB_API_RETRY_DELAY=0
+    export GITHUB_REPOSITORY="pantheon-systems/no-such-repo-$$"
+
+    run finish_github_deployment
+    assert_success
+    assert_output_contains "::warning::"
+}
+
+@test "prune_github_deployments: keeps the newest N and deletes the rest" {
+    CREATED_ENVS=""
+    local env_name i
+    env_name="ptp-prune-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    for i in 1 2 3 4; do
+        _make_deployment "${env_name}" "${env_name}" "${PANTHEON_SITE}"
+    done
+    _await_payload "${env_name}" "${PANTHEON_SITE}"
+
+    run prune_github_deployments "${env_name}" 2
+    assert_success
+    [ "$(_deployment_count "${env_name}")" = "2" ]
+
+    _cleanup_fixtures
+}
+
+@test "prune_github_deployments: caps deletions per run" {
+    CREATED_ENVS=""
+    local env_name i
+    env_name="ptp-prune-cap-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    for i in 1 2 3 4; do
+        _make_deployment "${env_name}" "${env_name}" "${PANTHEON_SITE}"
+    done
+    _await_payload "${env_name}" "${PANTHEON_SITE}"
+
+    run prune_github_deployments "${env_name}" 0 1
+    assert_success
+    [ "$(_deployment_count "${env_name}")" = "3" ]
+
+    _cleanup_fixtures
+}
+
+@test "prune_github_deployments: never deletes the deployment just made" {
+    CREATED_ENVS=""
+    local env_name i
+    env_name="ptp-prune-cur-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    for i in 1 2 3; do
+        _make_deployment "${env_name}" "${env_name}" "${PANTHEON_SITE}"
+    done
+    _await_payload "${env_name}" "${PANTHEON_SITE}"
+    export GITHUB_DEPLOYMENT_ID
+    GITHUB_DEPLOYMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq '.[-1].id')
+
+    run prune_github_deployments "${env_name}" 0
+    assert_success
+
+    run gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=${env_name}" --jq '.[].id'
+    [ "$output" = "${GITHUB_DEPLOYMENT_ID}" ]
+
+    _cleanup_fixtures
+}
+
+@test "prune_github_deployments: leaves another Pantheon site's deployments alone" {
+    CREATED_ENVS=""
+    local env_name i
+    env_name="ptp-prune-site-$(_fixture_suffix)-std"
+    _deploy_env "${env_name}"
+    for i in 1 2; do
+        _make_deployment "${env_name}" "${env_name}" "some-other-site"
+    done
+    _await_payload "${env_name}" "some-other-site"
+
+    run prune_github_deployments "${env_name}" 0
+    assert_success
+    [ "$(_deployment_count "${env_name}")" = "2" ]
+
+    _cleanup_fixtures
+}
+
+@test "prune_github_deployments: a listing failure warns and does not fail" {
+    export GITHUB_REPOSITORY="pantheon-systems/no-such-repo-$$"
+
+    run prune_github_deployments "whatever" 0
+    assert_success
+    assert_output_contains "skipping prune"
+}

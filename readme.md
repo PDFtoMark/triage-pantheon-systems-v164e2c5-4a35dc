@@ -1,0 +1,595 @@
+# Push to Pantheon (GitHub Action)
+
+[![Early Access](https://img.shields.io/badge/pantheon-early_access-yellow?logo=pantheon&logoColor=FFDC28&color=FFDC28)](https://docs.pantheon.io/oss-support-levels#early-access)
+
+This GitHub Action pushes your site's code from GitHub to [the Pantheon `Dev` environment](https://docs.pantheon.io/pantheon-workflow) or [Multidev environment](https://docs.pantheon.io/guides/multidev).
+
+It is designed to be used in GitHub Actions workflows that are triggered by Pull Requests and pushes to the `main` branch of your repository.
+
+When running workflow triggered by a pull request, this action will create a [Multidev environment](https://docs.pantheon.io/guides/multidev) and deploy code to it.
+
+![Deploying a PR to a Pantheon Multidev](.github/documentation/diagram--deploying-pr.png)
+
+When running on workflows triggered by merges/pushes to the `main` branch this action will deploy code to [the Pantheon `Dev` environment](https://docs.pantheon.io/pantheon-workflow).
+
+![Deploying main to Pantheon](.github/documentation/diagram--pushing-main.png)
+
+## Early Access
+
+As a publicly available GitHub Action, there is no gating mechanism preventing any Pantheon customer from using the code in this repository. However, this repository is in active development and behaviors may change between versions. Only teams with pre-existing Continuous Integration pipelines that they could fall back to, should try this repository at this time. [See our documentation for more information about software maturity and support](https://docs.pantheon.io/oss-support-levels#early-access).
+
+## Related Resources
+
+- [Why We Created a "Push to Pantheon" GitHub Action](https://pantheon.io/blog/github-action)
+- [Pantheon's GitHub Actions](https://docs.pantheon.io/github-actions)
+- [GitHub Application](https://docs.pantheon.io/github-application)
+- [Native GitHub workflows on Pantheon livestream recording](https://www.youtube.com/live/Wj9KoTqXwY0?si=1MQlHXDyjMVvWOyX)
+- [Terminus GitHub Action](https://github.com/pantheon-systems/terminus-github-actions)
+
+## Basic Usage
+
+This action provides a step that can be used as the only step within a job.
+More complex examples further below show additional steps and jobs used in conjunction with this action.
+
+Here is the beginning of a `jobs` section of a site's `.github/workflows/deploy-pr.yml` file that deploys a site to Pantheon when triggered by a Pull Request.
+
+```yml
+jobs:
+  push:
+    permissions:
+      deployments: write
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Push to Pantheon
+      uses: pantheon-systems/push-to-pantheon@0.9.7
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+```
+
+## Inputs
+<!-- AUTO-DOC-INPUT:START - Do not remove or modify this section -->
+
+|                                                 INPUT                                                 |  TYPE  | REQUIRED |         DEFAULT         |                                                                                                                                                                                                                                                                                                                   DESCRIPTION                                                                                                                                                                                                                                                                                                                    |
+|-------------------------------------------------------------------------------------------------------|--------|----------|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|       <a name="input_build_tools_version"></a>[build_tools_version](#input_build_tools_version)       | string |  false   |                         |                                                                                                                                                                                                                      The version of the Terminus <br>Build Tools plugin to install. <br>By default, the action will <br>install the latest stable version. <br>You can specify a specific <br>version or branch if needed.                                                                                                                                                                                                                       |
+|                <a name="input_clone_content"></a>[clone_content](#input_clone_content)                | string |  false   |        `"false"`        |                                                                                                                                           If set to true, the <br>database and files directory will <br>be re-cloned from the source <br>environment. When set to false, <br>this data is only copied <br>upon Multidev creations. Setting this <br>variable to true ensures fresh <br>content but adds time to <br>the build process that can <br>be prohibitive for sites with <br>large databases.                                                                                                                                            |
+| <a name="input_delete_old_environments"></a>[delete_old_environments](#input_delete_old_environments) | string |  false   |        `"false"`        |                                                                                                                                                                                           If set to true, Multidev <br>environments associated with closed pull <br>requests will be deleted after <br>deployment completes. It is recommended <br>to set this parameter to <br>true for workflows that run <br>after merges to the main <br>branch.                                                                                                                                                                                             |
+|  <a name="input_deployment_environment"></a>[deployment_environment](#input_deployment_environment)   | string |  false   |                         |                                                       The name of the GitHub <br>deployment environment used to report <br>this deployment in the pull <br>request timeline. Defaults to the <br>Pantheon target environment. Set this <br>when one branch deploys to <br>several Pantheon sites: GitHub groups <br>the timeline by environment name, <br>so identical names cause the <br>deployments to overwrite one another <br>and only the last one <br>is visible. Unlike the Pantheon <br>environment, this name is not <br>limited to 11 characters, e.g. <br>"my-site-pr-123".                                                         |
+|        <a name="input_git_commit_message"></a>[git_commit_message](#input_git_commit_message)         | string |  false   |                         |                                                                                                        A custom commit message to <br>be used with the Git <br>commit that will be pushed <br>to Pantheon. Multiline messages are <br>supported, which is how you <br>would pass git trailers such <br>as Source-Commit:. Leaving this Action <br>parameter blank will result in <br>a generic commit message being <br>used. This value is not <br>used on newer 'eVCS' sites <br>for which there is no <br>Pantheon-provided Git repo.                                                                                                         |
+|              <a name="input_git_user_email"></a>[git_user_email](#input_git_user_email)               | string |  false   | `"bot@getpantheon.com"` |                                                                                                                                                                                                                    The email address to be <br>used with the Git commit <br>that will be pushed to <br>Pantheon. This value is not <br>used on newer 'eVCS' sites <br>for which there is no <br>Pantheon-provided Git repo.                                                                                                                                                                                                                      |
+|                <a name="input_git_user_name"></a>[git_user_name](#input_git_user_name)                | string |  false   | `"Pantheon Automation"` |                                                                                                                                                                                                                         The name to be used <br>with the Git commit that <br>will be pushed to Pantheon. <br>This value is not used <br>on newer 'eVCS' sites for <br>which there is no Pantheon-provided <br>Git repo.                                                                                                                                                                                                                          |
+|                <a name="input_machine_token"></a>[machine_token](#input_machine_token)                | string |   true   |                         |                                                                                                                                                                                                                                                                      A token for authenticating with <br>Pantheon's command line: https://docs.pantheon.io/machine-tokens                                                                                                                                                                                                                                                                        |
+|        <a name="input_relative_site_root"></a>[relative_site_root](#input_relative_site_root)         | string |  false   |                         |                                                                                                                                                                         The root directory of the <br>site to be deployed relative <br>to the repository root. The <br>vast majority of users of <br>this action should leave this <br>value unchanged from the default. <br>The action will use this <br>value to change directories after <br>checking out the repo.                                                                                                                                                                           |
+|                             <a name="input_site"></a>[site](#input_site)                              | string |   true   |                         |                                                                                                                                                                                                                                                                                                   The machine name of your <br>Pantheon site.                                                                                                                                                                                                                                                                                                    |
+|           <a name="input_skip_build_tools"></a>[skip_build_tools](#input_skip_build_tools)            | string |  false   |        `"false"`        |                                                                                           If set to true, the <br>action will skip the installation <br>of the Terminus Build Tools <br>plugin and will not use <br>it to create Multidev environments <br>or push code. This is <br>useful if you just want <br>to push the code and <br>are not interested in syncing <br>the database and files as <br>part of your deploy process. <br>By default, the action will <br>install and use the Build <br>Tools plugin unless this is <br>set to true.                                                                                            |
+|    <a name="input_skip_terminus_install"></a>[skip_terminus_install](#input_skip_terminus_install)    | string |  false   |        `"false"`        |                                                                                      If set to true, the <br>action will skip the installation <br>of Terminus. This is useful <br>if you are using a <br>custom Docker image that already <br>has Terminus installed or you <br>are installing it earlier in <br>the workflow. By default, the <br>action will check for the <br>presence of Terminus and install <br>it if it is not <br>found, but if this is <br>set to true, the action <br>will bypass the check and <br>skip the Terminus install.                                                                                        |
+|                    <a name="input_source_env"></a>[source_env](#input_source_env)                     | string |  false   |        `"live"`         |                                                                                                                                                                                                                                                                               The environment from which the <br>database and uploaded files will <br>be copied.                                                                                                                                                                                                                                                                                 |
+|                         <a name="input_ssh_key"></a>[ssh_key](#input_ssh_key)                         | string |   true   |                         |                                                                                                                                                                                                                                                                      A private key that corresponds <br>to a public key on <br>Pantheon: https://docs.pantheon.io/ssh-keys                                                                                                                                                                                                                                                                       |
+|                    <a name="input_target_env"></a>[target_env](#input_target_env)                     | string |  false   |                         |                                                                               The Pantheon environment to which <br>the deployment will be made. <br>If left blank, the value <br>used will be automatically derived. <br>Pull requests will deploy to <br>environments named "pr-[NUMBER]" and main/master <br>branch commits will deploy to <br>the Pantheon "dev" environment. This <br>input does not apply to <br>main/master pushes, which always deploy <br>to dev. Setting target_env_strategy to <br>"branch" also takes precedence over <br>this value                                                                                 |
+|       <a name="input_target_env_strategy"></a>[target_env_strategy](#input_target_env_strategy)       | string |  false   |         `"pr"`          | How to derive the Pantheon <br>environment name. "pr" (the default) names <br>pull request environments "pr-[NUMBER]". "branch" <br>derives the name from the <br>branch, normalising it to satisfy <br>Pantheon rules -- lowercased, unusable <br>characters folded to hyphens, trimmed <br>to 11 characters -- and <br>appending a digit if another <br>branch already holds that name. <br>Reserved names are reported rather <br>than renamed. Pushes to main/master <br>deploy to the Pantheon "dev" <br>environment under either strategy, because <br>the Dev environment is fed <br>by the master branch rather <br>than by a Multidev.  |
+
+<!-- AUTO-DOC-INPUT:END -->
+
+## Outputs
+
+<!-- AUTO-DOC-OUTPUT:START - Do not remove or modify this section -->
+
+|                                                OUTPUT                                                |  TYPE  |                              DESCRIPTION                               |
+|------------------------------------------------------------------------------------------------------|--------|------------------------------------------------------------------------|
+| <a name="output_deployment_environment"></a>[deployment_environment](#output_deployment_environment) | string | The GitHub deployment environment used <br>to report this deployment   |
+|                   <a name="output_target_env"></a>[target_env](#output_target_env)                   | string |         The target environment the branch <br>was deployed to          |
+|             <a name="output_target_env_url"></a>[target_env_url](#output_target_env_url)             | string | The url for the target <br>environment the branch was deployed <br>to  |
+
+<!-- AUTO-DOC-OUTPUT:END -->
+
+## Parameters
+
+In order to use the step supplied by this Action, the GitHub Workflow must have access to [a token for authenticating with Pantheon's command line](https://docs.pantheon.io/machine-tokens) and [a private key](https://docs.pantheon.io/ssh-keys) that will allow Git pushes to Pantheon and other operations.
+Both of those values should be treated sensitively and stored as [GitHub Secrets](https://docs.github.com/en/actions/reference/encrypted-secrets).
+
+The only other required argument is the machine name of the Pantheon site to which the code will be pushed.
+
+The optional argument likely to be most commonly used is `delete_old_environments` which will delete Multidev environments associated with closed pull requests after the deployment completes. Setting `delete_old_environments: true` is recommended for workflows that run after merges to the `main` branch to avoid accumulating Multidev environments that are no longer needed.
+
+### Required Arguments
+
+#### `ssh_key`
+
+[A private key that corresponds to a public key on Pantheon](https://docs.pantheon.io/ssh-keys).
+
+#### `machine_token`
+
+[A token for authenticating with Pantheon's command line](https://docs.pantheon.io/machine-tokens).
+
+#### `site`
+
+The machine name of your Pantheon site.
+
+### Optional Arguments
+
+#### `delete_old_environments`
+
+If set to true, Multidev environments associated with closed pull requests will be deleted after deployment completes. It is recommended to set this parameter to true for workflows that run after merges to the main branch.
+
+```yml
+   default: false
+   type: boolean
+```
+
+#### `target_env`
+The Pantheon environment to which the deployment will be made. If left blank, the value used will be automatically derived. Pull requests will deploy to environments named `pr-${NUMBER}` and `main`/`master` branch commits will deploy to the Pantheon "dev" environment.
+
+```yml
+   default: ""
+```
+
+Precedence, highest first:
+
+1. Pushes to `main`/`master` always deploy to `dev`. Neither this input nor `target_env_strategy` applies there — Pantheon's Dev environment is fed by the `master` branch, and that is where a default-branch push belongs.
+2. [`target_env_strategy: branch`](#target_env_strategy), if set, names the environment after the branch and overrides this input.
+3. `target_env`, if set.
+4. Otherwise derived: `pr-${NUMBER}` for pull requests.
+
+If none of those apply — a push to a branch other than `main`/`master`, with no `target_env`, under the default `pr` strategy — there is no environment to deploy to. The action **skips the deployment and the job succeeds**: a Multidev comes from a pull request, so this is nothing to do rather than anything wrong. The step log records why.
+
+An uppercase `target_env` is lowercased rather than rejected, with a warning in the step log, because Pantheon requires lowercase and names are often built from branch names. No other rule is repaired.
+
+A misconfiguration still fails the job rather than skipping — a `target_env` Pantheon will not accept, an unknown `target_env_strategy`, or the `branch` strategy with no branch to read.
+
+#### `target_env_strategy`
+How to derive the Pantheon environment name. See [`target_env`](#target_env) for how the two interact.
+
+```yml
+   default: "pr"
+```
+
+| Value | Behaviour |
+|---|---|
+| `pr` (default) | Pull requests deploy to `pr-${NUMBER}`. |
+| `branch` | Pull requests and branch pushes deploy to a Multidev named after the branch. |
+
+Under `branch`, the branch name becomes the multidev environment name. Pantheon requires that name to be:
+
+- all lowercase
+- only letters, numbers and hyphens
+- starts with a letter or number
+- maximum of 11 characters
+- not one of Pantheon's reserved names: `master`, `settings`, `team`, `support`, `debug`, `multidev`, `multi`, `files`, `tags`, `billing`
+
+Names that do not qualify are normalised rather than refused: lowercased, unusable characters folded to hyphens, and trimmed to length.
+
+| Branch | Environment |
+|---|---|
+| `redesign` | `redesign` |
+| `MyBranch` | `mybranch` |
+| `release_2.1` | `release-2-1` |
+| `feat/102-branch-name-strategy` | `feat-102-br` |
+
+Reserved names are the exception. `debug`, `files`, `multi` and the rest are reported rather than renamed, because renaming them would invent an environment name that was never asked for.
+
+**Truncation and collisions.** Trimming to 11 characters means long branches sharing a prefix reduce to the same name — `feature/login-a` and `feature/login-b` both give `feature-log`. Rather than let the second branch deploy over the first, the last character is traded for a digit:
+
+| Branch | Environment |
+|---|---|
+| `feature/login-a` | `feature-log` |
+| `feature/login-b` | `feature-lo0` |
+| `feature/login-c` | `feature-lo1` |
+
+```yml
+      - uses: pantheon-systems/push-to-pantheon@0.9.7
+        with:
+          target_env_strategy: branch
+          # a PR from branch "redesign" deploys to the "redesign" Multidev
+```
+
+#### `deployment_environment`
+The name of the GitHub deployment environment used to report this deployment in the pull request timeline. Defaults to the Pantheon target environment.
+
+```yml
+   default: ""
+```
+
+Set this when one branch deploys to more than one Pantheon site. GitHub groups the timeline by environment name, and the Pantheon environment is derived from the pull request number alone — so every site in a matrix produces `pr-123`, the deployments land in the same GitHub environment, and each one overwrites the last. Only the site that finished most recently stays visible.
+
+Giving each site its own name keeps them separate. Unlike the Pantheon environment, this value is not limited to 11 characters:
+
+```yml
+    strategy:
+      matrix:
+        site: [ my-first-site, my-second-site ]
+    steps:
+      - uses: pantheon-systems/push-to-pantheon@0.9.7
+        with:
+          site: ${{ matrix.site }}
+          deployment_environment: ${{ matrix.site }}-pr-${{ github.event.pull_request.number }}
+          # ...
+```
+
+The action records the site and Pantheon environment on each deployment, so `delete_old_environments` still finds and removes these environments even though their names no longer match the multidev.
+
+
+#### `source_env`
+
+The environment from which the database and uploaded files will be copied.
+
+```yml
+   default: "live"
+```
+
+#### `clone_content`
+
+If set to true, the database and files directory will be re-cloned from the source environment. When set to false, this data is only copied upon Multidev creations. Setting this variable to true ensures fresh content but adds time to the build process that can be prohibitive for sites with large databases.
+
+```yml
+   default: false
+   type: boolean
+```
+
+#### `clone_files`
+
+When set to false, new Multidev environments are created without cloning the files directory from the source environment (passes `--no-files` to `terminus multidev:create`). Useful for sites that serve missing files on demand from another environment, for example with the Drupal [Stage File Proxy](https://www.drupal.org/project/stage_file_proxy) module. Only applies when the action creates the Multidev itself, which happens when `skip_build_tools` is true or the live environment has not been initialized. Existing Multidevs are not affected.
+
+```yml
+   default: true
+   type: boolean
+```
+
+#### `clone_database`
+
+When set to false, new Multidev environments are created without cloning the database from the source environment (passes `--no-db` to `terminus multidev:create`). Same scope as `clone_files`: only applies when the action creates the Multidev itself.
+
+```yml
+   default: true
+   type: boolean
+```
+
+#### `git_user_name`
+
+The name to be used with the Git commit that will be pushed to Pantheon. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo.
+
+```yml
+   default: "GitHub Action Automation"
+```
+
+#### `git_user_email`
+The email address to be used with the Git commit that will be pushed to Pantheon. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo.
+
+```yml
+   default: "GitHubAction@example.com"
+```
+
+#### `git_commit_message`
+A custom commit message to be used with the Git commit that will be pushed to Pantheon. Leaving this Action parameter blank will result in a generic commit message being used. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo.
+
+```yml
+   default: ""
+```
+
+Multiline messages are supported. A Pantheon repo is not a mirror of your source repo — the deploy commits a built artifact into Pantheon's own history, so that commit's SHA does not exist on GitHub. Passing the provenance as [git trailers](https://git-scm.com/docs/git-interpret-trailers) lets a Quicksilver hook recover it later on dev, and again on test and live after promotion:
+
+```yml
+      - name: Compose commit message
+        id: msg
+        run: |
+          {
+            echo "message<<EOF"
+            echo "Deploy ${GITHUB_REF_NAME} to Pantheon"
+            echo
+            echo "Source-Commit: ${GITHUB_SHA}"
+            echo "Source-Ref: ${GITHUB_REF}"
+            echo "CI-Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: pantheon-systems/push-to-pantheon@0.9.7
+        with:
+          git_commit_message: ${{ steps.msg.outputs.message }}
+          # ...
+```
+
+#### `relative_site_root`
+The root directory of the site to be deployed relative to the repository root. The vast majority of users of this action should leave this value unchanged from the default. The action will use this value to change directories after checking out the repo.
+
+```yml
+   default: ""
+```
+
+#### `skip_terminus_install`
+If set to true, the action will skip installing Terminus. This is useful if you are using this action in a workflow that already has Terminus installed, such as the [Terminus GitHub Action](https://github.com/pantheon-systems/terminus).
+
+```yml
+   default: false
+   type: boolean
+```
+
+#### `build_tools_version`
+The version of Pantheon's Terminus Build Tools Plugin to install. By default, the latest stable version will be installed. This parameter is primarily used to test changes between the Terminus plugin and this GitHub Action. Customers can also use it if they immediately need an alternate version of Build Tools. Open an issue if you find yourself regularly needing this parameter.
+
+```yml
+   default: ""
+   type: string
+```
+
+**Example usage:**
+```yml
+    - name: Push to Pantheon
+      uses: pantheon-systems/push-to-pantheon@57-use-tagged-build-tools
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.TERMINUS_MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+        clone_content: true
+        build_tools_version: "dev-cms-637-gitlab-infer"
+```
+
+#### `skip_build_tools`
+If set to true, the action will skip the installation of Pantheon's Terminus Build Tools plugin and will not use it to create Multidev environments or push code. This is useful if you _just_ want to push the code and are not interested in syncing the database and files as part of your deploy process or if you do not wish to clone the database from a live environment (for example, if a live environment does not exist).
+
+```yml
+   default: false
+   type: boolean
+```
+
+## Additional recommendations
+
+### Pin exact version of this action prior to the release of version 1.0.0
+
+Prior to the release of version 1.0.0, it is recommended to pin the version of this action to a specific version in your workflow file.
+This will prevent breaking changes from being introduced to your workflow without your knowledge.
+The most likely breaking change would be a change to the name of the action or the name of the inputs.
+For instance is `delete_old_environments` the best name for that parameter?
+[We might change it.](https://github.com/pantheon-systems/push-to-pantheon/issues/6)
+
+To pin the version of this action to a specific version, use the `@` symbol followed by the version number in the `uses` key of the step that uses this action.
+For example, to use version 0.4.1 of this action, the step would look like this:
+
+```yml
+- name: Push to Pantheon
+  uses: pantheon-systems/push-to-pantheon@0.4.1
+  with:
+    ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+    machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+    site: ${{ vars.PANTHEON_SITE }}
+```
+
+### `push-to-pantheon` or [Integrated Composer](https://docs.pantheon.io/guides/integrated-composer)
+
+Integrated Composer is a feature of the Pantheon platform that runs Composer commands natively on Pantheon sites. Specifically, it integrates into the site update workflow (by running `composer update` in the background and alerting on the dashboard when updates are available) and into the code deployment workflow (by running `composer install` on code deployments to ensure that dependencies are installed).
+
+If you are using this action to push code to Pantheon, it is _not recommended_ to use Integrated Composer to manage your Composer dependencies. Instead, you should run Composer workflows in a GitHub Actions-based pipeline alongside this action. Using the `push-to-pantheon` action _alongside_ Integrated Composer can _greatly_ increase the time it takes to deploy code, which can lead to additional spend on GitHub Actions minutes and a poor developer experience due to long deployment times.
+
+We have recorded **50% reductions in deployment times** using the `push-to-pantheon` action to compile Composer dependencies and deploy the code to your Pantheon site versus using Integrated Composer natively on Pantheon.
+
+See the [Composer example](#composer-example) below for an example of how to run Composer commands in GitHub Actions prior to pushing code to Pantheon.
+
+## Pushing from a GitHub repository to a Pantheon-hosted repository
+
+Pantheon provides a Git repository for each site hosted on our platform.
+This assumption allows teams to use Git without paying for a separate Git hosting service.
+However, many teams prefer to use third-party repositories like GitHub as their Git hosting service.
+
+This Action is designed to work with those workflows where the Git repository is hosted on GitHub and pushing from GitHub to Pantheon.
+If you are interested in a native integration with GitHub that _only_ uses a single repository hosted on GitHub via a [GitHub Application](https://docs.pantheon.io/github-application), you may [request access to the private beta](https://docs.google.com/forms/d/e/1FAIpQLSf0vYrRbPQBxR-hT8kGJ4bEdYPtpkTtfDvPM89xD2dNZeqLqA/viewform).
+
+![App vs Action diagram](.github/documentation/app-vs-action-repo-diagram.png)
+
+### Additional build steps like `composer install` and `npm build`
+
+By default this action will check out the code from the GitHub repository and push it to Pantheon.
+For many WordPress sites and Drupal sites, this is all that is needed.
+By setting [`build_step: true` in the `pantheon.yml`](https://docs.pantheon.io/pantheon-yml#integrated-composer-build-step), Pantheon will execute `composer install` and eventually `npm build` for compilation of CSS and JS assets needed for a theme.
+
+However, some teams prefer to do these build steps in GitHub Actions before pushing to Pantheon.
+
+That use case can be accommodated by adding additional steps to the workflow before the step that uses this action.
+
+#### NPM example
+
+Here's an example from a real site that uses Tailwind to prepare CSS in the site's custom theme.
+
+```yml
+  push-to-pantheon:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    # The custom theme for this site uses Tailwind to build the
+    # appropriate CSS file.
+    - run: "cd web/themes/my_custom_theme && npm ci && npm run build"
+    # Deleting this small .gitignore that ignores compiled CSS
+    # from the GitHub repo will allow it to be committed and pushed
+    # to Pantheon in the later "push-to-pantheon" step.
+    - run: "cd web/themes/my_custom_theme/css && rm .gitignore"
+    - name: Push to Pantheon
+      uses: pantheon-systems/push-to-pantheon@0.9.7
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+```
+
+By calling `npm run build` and modifying `gitignore` prior to calling `push-to-pantheon`, the Tailwind-generated CSS (which is not wanted in the GitHub repo) is available to be committed (and pushed) inside the `push-to-pantheon` step.
+
+#### Composer example
+
+The following example shows our recommended way to run `composer install` prior to pushing code to Pantheon. This workflow uses caching in GitHub Actions to speed up the Composer install step by reusing previously installed dependencies stored in the `vendor` directory as well as running `composer install` with the `--no-dev` flag to avoid installing development dependencies. The latter might not be desirable for workflows that deploy to Multidev environments for pull requests where development dependencies might be needed for testing.
+
+```yml
+  push-to-pantheon:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Fetch cached Composer dependencies
+      uses: actions/cache@v6
+      with:
+        path: vendor
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
+    - name: Composer install
+      run: composer install --no-dev --optimize-autoloader
+    - name: Save Composer cache
+      uses: actions/cache@v6
+      with:
+        path: vendor
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
+    - name: Push to Pantheon
+      uses: pantheon-systems/push-to-pantheon@0.9.7
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+```
+
+### Permissions
+
+This action needs permission to perform its work. Set the following permissions either at the level of the workflow or at the level of the job that uses this action.
+
+```yml
+    permissions:
+      deployments: write
+      contents: read
+      pull-requests: write
+```
+
+The `deployments: write` permission is required to notify GitHub that the deployment has been made (to a Pantheon Multidev usually).
+This is required for the GitHub UI to show the deployment status of the pull request:
+
+![Deployments appearing in GitHub UI](.github/documentation/deployment-in-github-ui.png)
+
+The `contents: read` permission is required for the job to check out the code from the GitHub repository.
+Even though this action does not checkout of the code itself, the code must be checked out prior to this step in order for the action to work.
+
+The `pull-requests: write` permission is required for two things: reading pull request state in order to delete old Multidev environments associated with closed pull requests, and posting a comment on the pull request when a site's Multidev environment limit has been reached.
+
+[See the GitHub Actions documentation for more information on permissions.](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/controlling-permissions-for-github_token)
+
+### Using this action with robots (like Dependabot)
+
+When using this action with robots like [Dependabot](https://docs.github.com/en/code-security/getting-started/dependabot-quickstart-guide), it is important to ensure that the workflow has access to the secrets needed to push to Pantheon.
+This is because robots like Dependabot create pull requests from forks of the repository, and GitHub does not allow secrets to be used in workflows triggered by pull requests from forks for security reasons.
+To work around this, you can use the `pull_request_target` event instead of the `pull_request` event combined with a two-step checkout process that ensures that the code being executed is from the base repository, not the fork.
+
+Here is an example of how to set up a workflow that uses this action with Dependabot:
+
+```yml
+name: Deploy PR to Pantheon
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+jobs:
+  push:
+    permissions:
+      deployments: write
+      contents: write # needed to checkout the PR code.
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+    # Checkout the base repository code into the root directory.
+    # This is the code that will be used to run the workflow.
+    - name: Checkout base repository code
+      uses: actions/checkout@v7
+
+    # Checkout the pull request code into a subdirectory.
+    # This is the code that will be deployed.
+    - name: Checkout PR code
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
+        path: pr-code
+    - name: Push to Pantheon
+      uses: pantheon-systems/push-to-pantheon@0.9.7
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+        relative_site_root: pr-code
+```
+
+### Concurrency
+
+Sometimes in the course of development it is normal to push one commit to a branch with a pull request and then push another commit a minute later and then another. Similarly, a team might merge five pull requests in quick succession.
+Depending on the nature of the project, the team might not want Workflows to be processed for every single commit.
+In addition, when multiple GitHub Workflows run concurrently, the subsequent pushes to the Pantheon environment may fail anyway, because Pantheon only supports a single `sync_code` workflow to run at a time.
+
+To ensure that only one build runs at a time for a pull request, include this `concurrency` section in your workflow's yml file:
+
+```yml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+
+For a workflow that handles only the main branch, that section could be altered to:
+
+```yml
+concurrency:
+  group: ${{ github.workflow }}-main
+  cancel-in-progress: true
+```
+
+**Note:** Cancelled workflows do not necessarily immediately halt all operations, for example when Terminus triggers a workflow to run. This can sometimes result in confusing error states or failed automated tests. In most cases, a subsequent push will resolve the conflict but it is nevertheless recommended to avoid pushing many commits in quick succession.
+
+### Using additional jobs to test your code and the deployed site
+
+Unit tests and code sniffing/linting generally do not need a fully functioning site in order to execute.
+Therefore you can run them in parallel with the job that pushes the site to Pantheon.
+End to end tests that depend on a fully functioning site should wait for the job that pushes to complete so that the tests can run against the deployed site.
+
+In this example, coding standards checks are run in parallel with the `push-to-pantheon` job and tests written in [Playwright](https://playwright.dev/) which check customized CMS functionality run after the deployment completes.
+
+Here is an example from a real site that runs a coding standards check in parallel to the `push-to-pantheon` job.
+
+![Parallel and Serial Jobs](.github/documentation/parallel-and-serial-jobs.png)
+
+Here is how those jobs are defined in an example site's `.github/workflows/deploy-pr.yml` file:
+
+```yml
+jobs:
+  push-to-pantheon:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy to Pantheon
+      uses: pantheon-systems/push-to-pantheon@0.9.7
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        site: ${{ vars.PANTHEON_SITE }}
+
+  code_standards_check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Composer install
+      run: composer install
+    - name: Check coding standards
+      run: composer run cs
+
+  playwright:
+    needs: push-to-pantheon
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v7
+    - uses: ./.github/actions/playwright-against-pantheon
+      with:
+        ssh_key: ${{ secrets.PANTHEON_SSH_KEY }}
+        machine_token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        pantheon_site: ${{ vars.PANTHEON_SITE }}
+```
+
+## Custom Upstreams
+
+This action is not intended for use in upstream management (e.g. deploying changes to _many_ sites that use a specific custom upstream). In the future, an additional workflow may be added to support this, but this is not currently on the roadmap for a 1.0.0 release.
+
+In the meantime, if you are looking for a GitHub action to manage sites that use custom upstreams, you can look at these example workflows that are built for that purpose:
+
+* https://github.com/danny2p/wp-standard/blob/master/.github/workflows/2-deploy-dev.yml
+* https://github.com/jazzsequence/plague-music-wp-upstream/blob/main/.github/workflows/deploy-dev.yml
+
+PRs are always welcome! You can track updates for this feature in the [associated GitHub issue](https://github.com/pantheon-systems/push-to-pantheon/issues/70).

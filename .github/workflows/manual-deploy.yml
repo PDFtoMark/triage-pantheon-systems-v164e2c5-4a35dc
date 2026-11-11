@@ -1,0 +1,97 @@
+name: Manual Deploy Branch to Pantheon
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Which test suite(s) to run'
+        type: choice
+        options:
+          - all
+          - standard
+          - content
+          - git
+          - terminus
+          - advanced
+          - branch-naming
+          - build-tools-advanced
+        default: all
+
+jobs:
+  compute_env_prefix:
+    name: Compute Environment Prefix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      env_prefix: ${{ steps.compute.outputs.env_prefix }}
+    steps:
+      - name: Compute environment prefix
+        id: compute
+        run: |
+          # For 0.x branch, use "0x" as prefix
+          # For other branches, use first 6 chars of sanitized branch name
+          if [ "${{ github.ref_name }}" == "0.x" ]; then
+            ENV_PREFIX="0x"
+          else
+            # Lowercase (Pantheon rejects uppercase, and branches such as the
+            # TEST-* ones from test-fork-pr have it), remove non-alphanumeric
+            # characters (except hyphens) and take first 6 chars
+            SHORT_REF=$(echo "${{ github.ref_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | cut -c1-6)
+            ENV_PREFIX="${SHORT_REF}"
+          fi
+
+          echo "Computed environment prefix: ${ENV_PREFIX}"
+          echo "env_prefix=${ENV_PREFIX}" >> $GITHUB_OUTPUT
+
+  run_test_suites:
+    name: Run Test Suites
+    needs: compute_env_prefix
+    permissions:
+      deployments: write
+      contents: write
+      # test-suites.yml requests write, and a called workflow cannot be granted
+      # less than it asks for. #164 raised this in deploy-pr.yml and test-suites.yml
+      # but not here, which left every manual deploy failing at startup.
+      pull-requests: write
+    uses: ./.github/workflows/test-suites.yml
+    with:
+      env_prefix: ${{ needs.compute_env_prefix.outputs.env_prefix }}
+      suite: ${{ inputs.suite }}
+    secrets:
+      PANTHEON_SSH_KEY: ${{ secrets.PANTHEON_SSH_KEY }}
+      PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+
+  cleanup:
+    name: Cleanup Test Environments
+    needs: [compute_env_prefix, run_test_suites]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Terminus
+        uses: pantheon-systems/terminus-github-actions@v1
+        with:
+          pantheon-machine-token: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+
+      - name: Install Terminus Build Tools Plugin
+        run: terminus self:plugin:install pantheon-systems/terminus-build-tools-plugin
+
+      - name: Cleanup environments
+        env:
+          PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+          PANTHEON_SITE: dtp-nearly-empty-site
+          ENV_PREFIX: ${{ needs.compute_env_prefix.outputs.env_prefix }}
+          DELETE_OLD_MULTIDEVS: true
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_PROJECT_USERNAME: ${{ github.repository_owner }}
+          CI_PROJECT_REPONAME: ${{ github.event.repository.name }}
+        run: bash scripts/main.sh cleanup
