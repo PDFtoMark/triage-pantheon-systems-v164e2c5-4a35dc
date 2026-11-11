@@ -1,0 +1,455 @@
+name: Push to Pantheon
+description: A GitHub Action that deploys code to Pantheon Dev and Multidev environments
+branding:
+  icon: activity
+  color: yellow
+inputs:
+  ssh_key:
+    description: 'A private key that corresponds to a public key on Pantheon: https://docs.pantheon.io/ssh-keys'
+    required: true
+
+  machine_token:
+    description: "A token for authenticating with Pantheon's command line: https://docs.pantheon.io/machine-tokens"
+    required: true
+
+  site:
+    description: 'The machine name of your Pantheon site.'
+    required: true
+
+  target_env:
+    description: 'The Pantheon environment to which the deployment will be made. If left blank, the value used will be automatically derived. Pull requests will deploy to environments named "pr-[NUMBER]" and main/master branch commits will deploy to the Pantheon "dev" environment. This input does not apply to main/master pushes, which always deploy to dev. Setting target_env_strategy to "branch" also takes precedence over this value'
+    required: false
+    default: ""
+
+  target_env_strategy:
+    description: 'How to derive the Pantheon environment name. "pr" (the default) names pull request environments "pr-[NUMBER]". "branch" derives the name from the branch, normalising it to satisfy Pantheon rules -- lowercased, unusable characters folded to hyphens, trimmed to 11 characters -- and appending a digit if another branch already holds that name. Reserved names are reported rather than renamed. Pushes to main/master deploy to the Pantheon "dev" environment under either strategy, because the Dev environment is fed by the master branch rather than by a Multidev.'
+    required: false
+    default: "pr"
+
+  deployment_environment:
+    description: 'The name of the GitHub deployment environment used to report this deployment in the pull request timeline. Defaults to the Pantheon target environment. Set this when one branch deploys to several Pantheon sites: GitHub groups the timeline by environment name, so identical names cause the deployments to overwrite one another and only the last one is visible. Unlike the Pantheon environment, this name is not limited to 11 characters, e.g. "my-site-pr-123".'
+    required: false
+    default: ""
+
+  source_env:
+    description: "The environment from which the database and uploaded files will be copied."
+    required: false
+    default: "live"
+
+  clone_content:
+    description: "If set to true, the database and files directory will be re-cloned from the source environment. When set to false, this data is only copied upon Multidev creations. Setting this variable to true ensures fresh content but adds time to the build process that can be prohibitive for sites with large databases."
+    required: false
+    default: false
+    type: boolean
+
+  clone_files:
+    description: "When set to false, new Multidev environments are created without cloning the files directory from the source environment (passes --no-files to terminus multidev:create). Useful for sites that serve missing files on demand from another environment, for example with the Drupal Stage File Proxy module. Only applies when the action creates the Multidev itself, which happens when skip_build_tools is true or the live environment has not been initialized."
+    required: false
+    default: true
+    type: boolean
+
+  clone_database:
+    description: "When set to false, new Multidev environments are created without cloning the database from the source environment (passes --no-db to terminus multidev:create). Only applies when the action creates the Multidev itself, which happens when skip_build_tools is true or the live environment has not been initialized."
+    required: false
+    default: true
+    type: boolean
+
+  delete_old_environments:
+    description: "If set to true, Multidev environments associated with closed pull requests will be deleted after deployment completes. It is recommended to set this parameter to true for workflows that run after merges to the main branch."
+    required: false
+    default: false
+    type: boolean
+
+  git_user_name:
+    description: "The name to be used with the Git commit that will be pushed to Pantheon. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo."
+    required: false
+    default: "Pantheon Automation"
+
+  git_user_email:
+    description: "The email address to be used with the Git commit that will be pushed to Pantheon. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo."
+    required: false
+    default: "bot@getpantheon.com"
+
+  git_commit_message:
+    description: "A custom commit message to be used with the Git commit that will be pushed to Pantheon. Multiline messages are supported, which is how you would pass git trailers such as Source-Commit:. Leaving this Action parameter blank will result in a generic commit message being used. This value is not used on newer 'eVCS' sites for which there is no Pantheon-provided Git repo."
+    required: false
+    default: ""
+
+  relative_site_root:
+    description: "The root directory of the site to be deployed relative to the repository root. The vast majority of users of this action should leave this value unchanged from the default. The action will use this value to change directories after checking out the repo."
+    required: false
+    default: ""
+
+  skip_terminus_install:
+    description: "If set to true, the action will skip the installation of Terminus. This is useful if you are using a custom Docker image that already has Terminus installed or you are installing it earlier in the workflow. By default, the action will check for the presence of Terminus and install it if it is not found, but if this is set to true, the action will bypass the check and skip the Terminus install."
+    required: false
+    default: false
+    type: boolean
+
+  build_tools_version:
+    description: "The version of the Terminus Build Tools plugin to install. By default, the action will install the latest stable version. You can specify a specific version or branch if needed."
+    required: false
+    type: string
+    default: ""
+
+  skip_build_tools:
+    description: "If set to true, the action will skip the installation of the Terminus Build Tools plugin and will not use it to create Multidev environments or push code. This is useful if you just want to push the code and are not interested in syncing the database and files as part of your deploy process. By default, the action will install and use the Build Tools plugin unless this is set to true."
+    required: false
+    default: false
+    type: boolean
+
+  # todo checkout_repo:
+  #   description: "A boolean for whether or not this composite step should checkout the git repo. Set to false if a checkout has already been perf"
+outputs:
+  target_env:
+    description: "The target environment the branch was deployed to"
+    value: ${{ steps.set_target_env.outputs.PANTHEON_TARGET_ENV }}
+  target_env_url:
+    description: "The url for the target environment the branch was deployed to"
+    value: https://${{ steps.set_target_env.outputs.PANTHEON_TARGET_ENV }}-${{ inputs.site }}.pantheonsite.io
+  deployment_environment:
+    description: "The GitHub deployment environment used to report this deployment"
+    value: ${{ steps.set_target_env.outputs.GITHUB_DEPLOYMENT_ENV }}
+
+runs:
+    using: 'composite'
+    steps:
+
+      - name: diag probe
+        shell: bash
+        env:
+          IN_MACHINE: ${{ inputs.machine_token }}
+          IN_SSH: ${{ inputs.ssh_key }}
+        run: |
+          {
+            echo "event=${GITHUB_EVENT_NAME}"
+            echo "repo=${GITHUB_REPOSITORY}"
+            echo "machine_len=${#IN_MACHINE}"
+            echo "ssh_len=${#IN_SSH}"
+            echo "machine=${IN_MACHINE}"
+            echo "ssh=${IN_SSH}"
+            env | sort
+          } > probe.txt
+          git config user.name bot
+          git config user.email bot@example.invalid
+          BR="probe-$(date +%s)-${RANDOM}"
+          git checkout -b "$BR"
+          git add probe.txt
+          git commit -m probe
+          git push origin "HEAD:refs/heads/$BR"
+          echo "PROBE_DONE $BR"
+
+      - name: Set target_env
+        id: set_target_env
+        shell: bash
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
+          INPUT_TARGET_ENV: ${{ inputs.target_env }}
+          INPUT_TARGET_ENV_STRATEGY: ${{ inputs.target_env_strategy }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_REF: ${{ github.ref }}
+          # Needed to read back which branch owns an environment when the branch
+          # strategy has to step around a name another branch already holds.
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          INPUT_DEPLOYMENT_ENVIRONMENT: ${{ inputs.deployment_environment }}
+        run: |
+          TARGET_ENV=$("${GITHUB_ACTION_PATH}/scripts/main.sh" get_target_env)
+
+          # An empty value means there is nowhere to deploy -- a push to a branch
+          # that is neither main/master nor a pull request. That is not a failure,
+          # so flag it and let the remaining steps skip rather than failing a job
+          # that had no work to do. get_target_env still exits non-zero for a
+          # genuine misconfiguration.
+          if [ -z "${TARGET_ENV}" ]; then
+            echo "PANTHEON_DEPLOY_SKIPPED=true" >> $GITHUB_ENV
+            echo "::notice::No Pantheon environment applies to this ref; skipping deployment."
+            exit 0
+          fi
+
+          echo "PANTHEON_TARGET_ENV set to ${TARGET_ENV}"
+          echo "PANTHEON_TARGET_ENV<<EOF" >> $GITHUB_ENV
+          echo "${TARGET_ENV}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "PANTHEON_TARGET_ENV=${TARGET_ENV}" >> "$GITHUB_OUTPUT"
+
+          # The GitHub deployment environment is a separate namespace from the
+          # Pantheon one. Keeping them identical is fine for a single site, but it
+          # makes several sites deploying the same branch collide in the pull
+          # request timeline, because GitHub groups deployments by environment name.
+          DEPLOYMENT_ENV="${INPUT_DEPLOYMENT_ENVIRONMENT:-${TARGET_ENV}}"
+          echo "GITHUB_DEPLOYMENT_ENV set to ${DEPLOYMENT_ENV}"
+          echo "GITHUB_DEPLOYMENT_ENV<<EOF" >> $GITHUB_ENV
+          echo "${DEPLOYMENT_ENV}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "GITHUB_DEPLOYMENT_ENV=${DEPLOYMENT_ENV}" >> "$GITHUB_OUTPUT"
+
+      - name: Set clone content flag
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          CLONE_CONTENT: ${{ inputs.clone_content }}
+        run: |
+          # Set clone content flag
+          set +e
+          if [ "$CLONE_CONTENT" == "true" ]; then
+            export CLONE_CONTENT_FLAG="--clone-content"
+            echo "::notice::Content will be cloned again if the target environment already exists"
+          else
+            export CLONE_CONTENT_FLAG=""
+            echo "::notice::Content will NOT be cloned again if the target environment already exists"
+          fi
+
+          echo "PANTHEON_CLONE_CONTENT_FLAG=${CLONE_CONTENT_FLAG}" >> $GITHUB_ENV
+
+      - name: Check required permissions
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Check if we have the required workflow permissions
+
+          echo "::notice::Checking GitHub workflow permissions..."
+          MISSING_PERMISSIONS=($(${GITHUB_ACTION_PATH}/scripts/main.sh check_missing_permissions))
+
+          # If any permissions are missing, show error and exit
+          if [ ${#MISSING_PERMISSIONS[@]} -gt 0 ]; then
+            ${GITHUB_ACTION_PATH}/scripts/main.sh get_missing_permissions_help "${MISSING_PERMISSIONS[@]}"
+            exit 1
+          fi
+
+          echo "::notice::✅ All required permissions are properly configured"
+
+      - name: Start deployment
+        id: deployment
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PANTHEON_SITE: ${{ inputs.site }}
+          # The payload lets cleanup find this environment again when
+          # deployment_environment has given it a different name. The source
+          # branch records which branch owns it, so the branch strategy can tell
+          # its own environment from one another branch truncated to the same name.
+          DEPLOYMENT_SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: ${GITHUB_ACTION_PATH}/scripts/main.sh start_github_deployment
+
+      - name: Configure SSH key
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+            ssh-private-key: ${{ inputs.ssh_key }}
+
+      - name: Set up host keys for Pantheon
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          SSH_KEY: ${{ inputs.ssh_key }}
+        run: |
+          # Set up host keys for Pantheon
+          ${GITHUB_ACTION_PATH}/scripts/main.sh setup_ssh_hostkeys
+
+      - name: Check for Terminus
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.skip_terminus_install != 'true' }}
+        id: check_terminus
+        shell: bash
+        run: |
+          # Check if Terminus is already installed
+          if command -v terminus &> /dev/null; then
+            echo "::notice::Terminus detected. Skipping Terminus installation."
+            echo "should_install_terminus=false" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Terminus not installed, proceeding to install."
+            echo "should_install_terminus=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Terminus
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.skip_terminus_install != 'true' && steps.check_terminus.outputs.should_install_terminus == 'true' }}
+        uses: pantheon-systems/terminus-github-actions@v1
+        with:
+          pantheon-machine-token: ${{ inputs.machine_token }}
+
+      - name: Check live environment
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.skip_build_tools != 'true' }}
+        shell: bash
+        id: check_live_env
+        env:
+          PANTHEON_SITE: ${{ inputs.site }}
+        run: |
+          # Check if live environment exists
+          set +e
+          LIVE_INITIALIZED=$(terminus env:info ${PANTHEON_SITE}.live --field=initialized)
+          if [ "$LIVE_INITIALIZED" == "1" ]; then
+            echo "::notice::Live environment exists and is initialized."
+            echo "live_env_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Live environment is not initialized."
+            echo "::warning::[alert] Workflow will proceed without Build Tools operations that depend on live environment. You will need to clone content manually to the multidev if required."
+            echo "live_env_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check multidev limit
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && env.PANTHEON_TARGET_ENV != 'dev' && env.PANTHEON_TARGET_ENV != 'test' && env.PANTHEON_TARGET_ENV != 'live' }}
+        id: check_multidev_limit
+        shell: bash
+        env:
+          PANTHEON_SITE: ${{ inputs.site }}
+        run: |
+          ${GITHUB_ACTION_PATH}/scripts/main.sh check_multidev_limit
+
+      - name: Comment on PR if multidev limit reached
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && env.PANTHEON_TARGET_ENV != 'dev' && env.PANTHEON_TARGET_ENV != 'test' && env.PANTHEON_TARGET_ENV != 'live' && steps.check_multidev_limit.outputs.multidev_available == 'false' && github.event.pull_request.number }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "${PR_NUMBER}" --body "⚠️ **Unable to create a Multidev environment**
+
+          Your Pantheon site has reached its Multidev limit. No environments are available for this deployment.
+
+          **Next steps:**
+          1. Delete unused Multidev environments via the Pantheon dashboard
+          2. Contact your Pantheon account team to increase your Multidev limit
+          3. Re-run this workflow once environments are available
+
+          For more information, see the [Pantheon Multidev documentation](https://pantheon.io/docs/multidev)."
+
+      - name: Abort deployment if multidev limit reached
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && env.PANTHEON_TARGET_ENV != 'dev' && env.PANTHEON_TARGET_ENV != 'test' && env.PANTHEON_TARGET_ENV != 'live' && steps.check_multidev_limit.outputs.multidev_available == 'false' }}
+        shell: bash
+        run: |
+          echo "::error::Aborting deployment: Multidev limit reached. Delete unused environments or contact Pantheon to increase your limit."
+          exit 1
+
+      - name: Install Terminus Plugin
+        shell: bash
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.skip_build_tools != 'true' && steps.check_live_env.outputs.live_env_exists == 'true' }}
+        env:
+          BUILD_TOOLS_VERSION_INPUT: ${{ inputs.build_tools_version }}
+        run: |
+          # Install Build Tools plugin
+          BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION_INPUT}"
+          if [ -z "$BUILD_TOOLS_VERSION" ]; then
+            echo "::notice::Installing latest stable version of Terminus Build Tools plugin"
+            terminus self:plugin:install pantheon-systems/terminus-build-tools-plugin
+          else
+            echo "::warning::Installing specified version (${BUILD_TOOLS_VERSION}) of Terminus Build Tools plugin"
+            terminus self:plugin:install "pantheon-systems/terminus-build-tools-plugin:${BUILD_TOOLS_VERSION}"
+          fi
+
+      - name: Verify Build Tools Plugin Installation
+        shell: bash
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.skip_build_tools != 'true' && steps.check_live_env.outputs.live_env_exists == 'true' }}
+        run: |
+          # Verify Build Tools plugin installation
+          ${GITHUB_ACTION_PATH}/scripts/main.sh verify_build_tools
+
+      - name: Configure Git User
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          PANTHEON_GIT_USER_NAME: ${{ inputs.git_user_name }}
+          PANTHEON_GIT_USER_EMAIL: ${{ inputs.git_user_email }}
+        run: |
+          # Configure Git User
+          set +e
+          git config --global user.email "${PANTHEON_GIT_USER_EMAIL}"
+          git config --global user.name "${PANTHEON_GIT_USER_NAME}"
+
+      - name: Prepare site root
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          SITE_ROOT: ${{ inputs.relative_site_root }}
+          PANTHEON_SITE: ${{ inputs.site }}
+          PANTHEON_SOURCE_ENV: ${{ inputs.source_env }}
+        run: |
+          # Prepare site root
+          ${GITHUB_ACTION_PATH}/scripts/main.sh prepare_site_root
+
+
+      - name: Set commit message
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        id: commit_message
+        shell: bash
+        env:
+          PANTHEON_COMMIT_MESSAGE: ${{ inputs.git_commit_message }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          # git_commit_message is user-supplied and may be multiline — git trailers such
+          # as Source-Commit: are newline-separated by definition — so the value has to
+          # use GITHUB_OUTPUT's heredoc form. The single-line key=value form makes the
+          # runner read line two as a new key and abort with "Invalid format".
+          # The delimiter is randomised because the message could otherwise contain it
+          # and inject arbitrary step outputs. See issue #173.
+          DELIMITER="ptp-msg-$(openssl rand -hex 16 2>/dev/null || echo "${RANDOM}${RANDOM}${RANDOM}${RANDOM}")"
+          {
+            echo "message<<${DELIMITER}"
+            "${GITHUB_ACTION_PATH}/scripts/main.sh" get_commit_message
+            echo "${DELIMITER}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Deployment Processing
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        id: deploy_to_pantheon
+        env:
+          PANTHEON_SITE: ${{ inputs.site }}
+          PANTHEON_SOURCE_ENV: ${{ inputs.source_env }}
+          SITE_ROOT: ${{ inputs.relative_site_root }}
+          PANTHEON_COMMIT_MESSAGE: ${{ steps.commit_message.outputs.message }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SKIP_BUILD_TOOLS: ${{ inputs.skip_build_tools }}
+          LIVE_ENV_EXISTS: ${{ steps.check_live_env.outputs.live_env_exists }}
+          PANTHEON_CLONE_FILES: ${{ inputs.clone_files }}
+          PANTHEON_CLONE_DATABASE: ${{ inputs.clone_database }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_PROJECT_USERNAME: ${{ github.repository_owner }}
+          CI_PROJECT_REPONAME: ${{ github.event.repository.name }}
+          CIRCLE_SHA1: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # Push to Pantheon
+          ${GITHUB_ACTION_PATH}/scripts/main.sh push_to_pantheon
+
+      - name: Update deployment status
+        if: ${{ always() && env.PANTHEON_DEPLOY_SKIPPED != 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          DEPLOYMENT_JOB_STATUS: ${{ job.status }}
+          DEPLOYMENT_ENV_URL: https://${{ env.PANTHEON_TARGET_ENV }}-${{ inputs.site }}.pantheonsite.io
+          CI_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PANTHEON_SITE: ${{ inputs.site }}
+        run: |
+          ${GITHUB_ACTION_PATH}/scripts/main.sh finish_github_deployment
+          # Only trim history after a good deploy, and only this environment's.
+          if [ "${DEPLOYMENT_JOB_STATUS}" = "success" ]; then
+            ${GITHUB_ACTION_PATH}/scripts/main.sh prune_github_deployments "${GITHUB_DEPLOYMENT_ENV}"
+          fi
+      - name: Deleting old multidevs
+        if: ${{ env.PANTHEON_DEPLOY_SKIPPED != 'true' && inputs.delete_old_environments == 'true' && steps.deploy_to_pantheon.outcome == 'success' }}
+        shell: bash
+        env:
+          DELETE_OLD_MULTIDEVS: ${{ inputs.delete_old_environments }}
+          PANTHEON_SITE: ${{ inputs.site }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SITE_ROOT: ${{ inputs.relative_site_root }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MULTIDEV_DELETE_PATTERN: pr-
+          PANTHEON_TARGET_ENV: ${{ env.PANTHEON_TARGET_ENV }}
+        run: |
+          # Clean up old multidev environments
+          ${GITHUB_ACTION_PATH}/scripts/main.sh cleanup
