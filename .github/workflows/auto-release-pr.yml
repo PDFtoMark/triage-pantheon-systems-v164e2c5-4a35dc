@@ -28,6 +28,10 @@ jobs:
   create-release-pr:
     name: Create or Update Release PR
     runs-on: ubuntu-latest
+    # No GH_PAT exists in this isolated copy; export the automatic token so `gh`
+    # (GH_TOKEN empty -> GITHUB_TOKEN) can authenticate. No step is changed.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     # Only run if:
     # 1. Non-release PR was merged to 0.x (don't trigger when release PR is merged), OR
     # 2. Comment on a release PR (but not from bot), OR
